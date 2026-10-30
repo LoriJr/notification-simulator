@@ -1,0 +1,10 @@
+server:
+  port: 9091
+
+spring:
+  application:
+    name: notification-simulator
+
+simulator:
+  delay-ms: 1000
+  fail-enabled: false
