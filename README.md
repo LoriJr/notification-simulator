@@ -19,7 +19,8 @@ A aplicação representa um provedor externo de notificações. Ela recebe solic
 - Spring Boot 4.1.2;
 - Spring Web MVC;
 - Jakarta Validation;
-- Spring Boot Actuator;
+- Spring Boot Actuator e Micrometer Prometheus;
+- Docker, com Dockerfile para compilação e execução;
 - Lombok e SLF4J;
 - Maven, com Maven Wrapper incluído no projeto.
 
@@ -60,6 +61,15 @@ spring:
 simulator:
   delay-ms: 1000
   fail-enabled: false
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
+  metrics:
+    tags:
+      application: ${spring.application.name}
 ```
 
 | Propriedade | Configuração incluída | Comportamento |
@@ -72,11 +82,106 @@ O serviço rejeita atraso negativo na inicialização. Se `simulator.delay-ms` e
 
 Alterações no arquivo de configuração exigem reinício. Reiniciar também elimina o estado de idempotência mantido em memória.
 
+## Execução integrada pelo Docker Compose do OrderLab
+
+O Compose está no repositório do OrderLab e inicia PostgreSQL, OrderLab, este simulador, Prometheus e Grafana. Não existe Compose próprio neste repositório. O contexto configurado é `../notification-simulator`, portanto as pastas dos projetos devem estar lado a lado, ou esse caminho deve ser ajustado. O contexto deve conter `pom.xml`, `src` e `Dockerfile`.
+
+Pré-requisitos: Docker acessível no WSL/Linux, Compose com suporte a `build.entitlements` (2.27.1 ou posterior), Buildx/Bake e internet na primeira construção. Não é necessário instalar Java/Maven no host para esse modo.
+
+### Preparar e iniciar o ambiente
+
+Na pasta do **OrderLab**, configure o `.env` com as credenciais do banco, `GRAFANA_ADMIN_PASSWORD` e:
+
+```dotenv
+SIMULATOR_DELAY_MS=1000
+SIMULATOR_FAIL_ENABLED=false
+```
+
+Confira também os arquivos `monitoring/prometheus.yml` e `monitoring/grafana/datasources.yml` no OrderLab. Eles precisam existir como arquivos, com nomes iguais aos definidos no Compose. O esquema do banco precisa estar preparado conforme o README do OrderLab.
+
+Pare as versões Java abertas no IntelliJ para liberar as portas. Execute na pasta do OrderLab:
+
+```bash
+docker compose config --quiet
+docker buildx bake -f docker-compose.yaml --allow=network.host --load orderlab notification-simulator
+docker compose up -d --no-build
+docker compose ps -a
+```
+
+O Compose atual usa as imagens `orderlab-app:latest` e `notification-simulator-app:latest`. A opção `--load` carrega as imagens construídas no Docker local. A autorização `network.host` acompanha a configuração de build adotada neste WSL para resolver DNS durante a construção; não altera a rede dos serviços em execução.
+
+Os Dockerfiles geram o JAR com Maven 3.9/JDK 21 e executam com JRE 21. O build usa `-DskipTests`, que pula a execução dos testes, mas ainda compila os testes.
+
+### Acessos e logs
+
+| Recurso | Endereço pelo computador |
+| --- | --- |
+| Simulador: saúde | http://localhost:9091/actuator/health |
+| Simulador: métricas | http://localhost:9091/actuator/prometheus |
+| OrderLab | http://localhost:9090 |
+| Prometheus: alvos | http://localhost:9092/targets |
+| Grafana | http://localhost:3000 |
+
+```bash
+docker compose logs -f notification-simulator
+```
+
+`Ctrl+C` sai dos logs sem parar o serviço. Na rede interna, o OrderLab acessa `http://notification-simulator:9091`. Pelo navegador/Postman, use `localhost:9091`.
+
+O Prometheus coleta as métricas a cada 5 s. Seu alvo deve estar `UP`. No Grafana, use `admin` e a senha da primeira inicialização, selecione Prometheus em Explore e consulte:
+
+```promql
+up{job="notification-simulator"}
+```
+
+```promql
+sum(jvm_memory_used_bytes{application="notification-simulator",area="heap"}) / 1024 / 1024
+```
+
+A primeira consulta deve retornar 1; a segunda mostra heap em MiB, não memória total do contêiner. A fonte de dados é provisionada, mas ainda não há dashboards provisionados. As métricas padrão não oferecem automaticamente contadores de perdas/duplicações do negócio; preserve os logs e reconcilie com as tarefas do OrderLab.
+
+### Alterar cenários
+
+Edite `SIMULATOR_DELAY_MS` e `SIMULATOR_FAIL_ENABLED` no `.env` do OrderLab e reaplique:
+
+```bash
+docker compose up -d --no-build notification-simulator
+```
+
+| Cenário | Atraso | Falha habilitada |
+| --- | --- | --- |
+| Normal | 1000 | false |
+| HTTP 503 controlado | 1000 | true |
+| Espera maior que o timeout de leitura do OrderLab | 10000 | false |
+
+A recriação elimina a idempotência em memória. Para novos testes diretos, use chaves distintas. Uma alteração no `.env` não é aplicada apenas por `docker compose restart`.
+
+Para testar indisponibilidade, pare o simulador, crie um pedido no OrderLab e inicie-o novamente:
+
+```bash
+docker compose stop notification-simulator
+```
+
+```bash
+docker compose start notification-simulator
+```
+
+O reinício também elimina a memória de idempotência. Não faça essa ação durante uma rodada sem registrá-la como parte do cenário.
+
+Após alterar código, dependências ou YAML interno do simulador, execute na pasta do OrderLab:
+
+```bash
+docker buildx bake -f docker-compose.yaml --allow=network.host --load notification-simulator
+docker compose up -d --no-build notification-simulator
+```
+
+Para encerrar o ambiente preservando os volumes, use `docker compose down` na pasta do OrderLab. Não use `down -v` para uma parada normal. Fixe versões/digests das imagens antes da coleta oficial; os testes atuais são pilotos de preparação.
+
 ## Execução local
 
 Pré-requisitos: JDK 21 e acesso à internet na primeira execução para baixar o Maven e as dependências.
 
-Execute os comandos na pasta que contém `pom.xml` e os arquivos `mvnw`/`mvnw.cmd`. No ZIP de origem, essa pasta está em `notification-simulator/notification-simulator`.
+Execute os comandos na pasta que contém `pom.xml` e os arquivos `mvnw`/`mvnw.cmd`. No arquivo enviado nesta revisão, essa pasta é a raiz `notification-simulator`.
 
 ### Windows — PowerShell
 
